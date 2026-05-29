@@ -1,11 +1,13 @@
 import asyncio
 
 
+from re import search
 from typing import Any, Dict
 from langchain.agents import create_agent
 from langchain.messages import HumanMessage
 from langchain.tools import tool
 from langchain_mcp_adapters.client import MultiServerMCPClient
+from langgraph.runtime import Runtime
 from pydantic.v1 import tools
 from tavily import TavilyClient
 from langchain.agents import AgentState
@@ -13,19 +15,32 @@ from langchain.tools import ToolRuntime
 from langchain.messages import ToolMessage
 from langgraph.types import Command
 from dotenv import load_dotenv
+from langchain_community.utilities import SQLDatabase 
+from langchain.tools import ToolRuntime
+from langchain.messages import HumanMessage, ToolMessage
+from langgraph.types import Command
 import pprint
 import os
 
 load_dotenv()
 
 openai_api_key = os.getenv('OPENAI_API_KEY')
+
+# Instacia el cliente para realizar busquedas en internet.
+# Creo que es un MCP
 tavily_client = TavilyClient()
+
+
+# Aca se crea una clase que extiende de AgentState
+# Es para gestionar estados en langchain con el LLM
 class WeddingState(AgentState):
     origin: str
     destination: str
     guest_count: str
     genre: str
-
+    
+    
+# Se instancia un cliente MCP para buscar vuelos 
 client_mcp = MultiServerMCPClient(
     {
         "travel_server": {
@@ -35,17 +50,33 @@ client_mcp = MultiServerMCPClient(
     },
 )
 
+# Se define una funcion asincrona para recuperar los tools del MCP
+# search
+# query
 async def _get_mcp_tools():
     return await client_mcp.get_tools()
 
-
+# se guarda los tolls del MCP
 tools_mcp = asyncio.run(_get_mcp_tools())
 
 
+# se crea un tool calling para realizar busquedas en internet 
+# se usa el tavily client
 @tool
 def web_search(query: str) -> Dict[str, Any]:
     """Search the web for information"""
     return tavily_client.search(query)
+
+db = SQLDatabase.from_uri("sqlite:///resources/Chinook.db")
+
+@tool
+def query_playlist_db(query: str) -> str:
+    """Query the database for playlist information"""
+    try:
+        return db.run(query)
+    except Exception as e:
+        return f"Error al hacer la consulta"
+    
 
 
 # Sub-agente para buscar viajes en internet. 
@@ -65,7 +96,7 @@ travel_agent = create_agent(model='gpt-5-nano',
                                         """)
 
         
-subagent_2 = create_agent(model='gpt-5-nano', 
+search_spaces_agent = create_agent(model='gpt-5-nano', 
                           tools=[web_search],
                           system_prompt="""
                             Eres especialista en la organización de eventos. Busca espacios en la ubicación y con la capacidad deseadas.
@@ -76,19 +107,66 @@ subagent_2 = create_agent(model='gpt-5-nano',
                             Es posible que necesites realizar varias búsquedas para encontrar las mejores opciones.
                             Tienes un límite sugerido de 12 búsquedas web. Cuenta cada búsqueda que realices.
                             Después de 12 búsquedas, debes detener la búsqueda y resumir las mejores opciones que hayas encontrado hasta el momento.
-                          """)  
+                          """)
 
-## Tool Kit
+playlist_agent = create_agent(model="gpt-5-nano",
+                            tools=[query_playlist_db],
+                            system_prompt="""
+                                Eres un experto en listas de reproducción. Consulta la base de datos SQL y crea la 
+                                lista perfecta para una boda, especificando el género musical.
+                                Una vez que tengas tu lista, calcula su duración total y su costo; cada canción tiene un precio asociado.
+                                Si encuentras errores al consultar la base de datos, intenta solucionarlos modificando la consulta.
+                                No te rindas; sigue consultando la base de datos hasta que encuentres una lista de canciones.
+                                Esta es una base de datos SQLite. Antes de escribir cualquier consulta, familiarízate con el esquema.
+                            """)  
+
+##  Coordinadores principales de los sub agents.
+## Aca creamos tools pero que manejan a los sub agents segun nuestra logica de negocio
+## Tambien cambiamos lo que seria el State 
+## Creo ajaj
 
 @tool
-def call_travel_agent(query: str) -> str:
-    """Invoca al subagent_1 para realizar busquedas de vuelos al destino indicado"""
-    response = travel_agent.invoke({"message": [HumanMessage(content=f"Buscar sitios en internet segun consulta {query}")]})
+def search_travels(runtime: ToolRuntime) -> str:
+    """Invoca al travel_agent para realizar busquedas de vuelos al destino indicado"""
+    origin = runtime.state["origin"]
+    destination = runtime.state["destination"]
+    response = travel_agent.invoke({"message": [HumanMessage(content=f"Busca vuelos de {origin} a {destination}")]})
     return response["message"][-1].content
 
 
-agent = create_agent(model = "gpt-5-nano",
-                     tools=[call_travel_agent],
+@tool
+def search_spaces(runtime: ToolRuntime) -> str:
+    """El agente del lugar elige el mejor lugar para la ubicación y la capacidad determinadas"""
+    destination = runtime.state["destination"]
+    capacity = runtime.state["guest_count"]
+    query = f"Busca lugares en {destination} con capacidad de {capacity}"
+    response = search_spaces_agent.invoke({"message": [HumanMessage(content=query)]})
+    return response["message"][-1].content
+
+@tool
+def suggest_playlist(runtime: ToolRuntime) -> str:
+    """El agente de listas de reproducción selecciona la lista de reproducción perfecta para el género determinado."""
+    genre = runtime.state["genre"]
+    response = playlist_agent.invoke({"message": [HumanMessage(f"Busca play list de bodas con el genero {genre}")]})
+    return response["message"][-1].content
+
+@tool
+def update_state(origin: str, destination: str, guest_count: str, genre: str, runtime: ToolRuntime) -> str:
+    """Update the state when you know all of the values: origin, destination, guest_count, genre. 
+    This tool must be called alone, without any other tool calls. It must complete and return to make,
+    the information available to other tools."""
+    return Command(update={
+        "origin": origin, 
+        "destination": destination, 
+        "guest_count": guest_count, 
+        "genre": genre, 
+        "messages": [ToolMessage("Successfully updated state", tool_call_id=runtime.tool_call_id)]}
+        )
+
+## Agente orquestador
+coordinator = create_agent(model = "gpt-5-nano",
+                     tools=[search_travels, search_spaces, suggest_playlist],
+                     state_schema=WeddingState,
                      system_prompt = """Eres coordinadora de bodas. 
                                         Primero, reúne toda la información necesaria para actualizar el estado. 
                                         Cuando la tengas, actualiza el estado. Una vez completado y 
@@ -97,7 +175,8 @@ agent = create_agent(model = "gpt-5-nano",
                                         coordina la boda perfecta para mí.
                                         """)
 
-response = agent.invoke({'messages': [HumanMessage("Hola quiero realizar una boda,busca vuelos de Paraguay a hawai entre las fecha 12 de junio y 22 de junio de este año 2026")]})
+response = coordinator.invoke({'messages': [HumanMessage(content="Soy de Londres y me gustaría una boda en París para 100 invitados, con música jazz.")]},
+                              config={"tags": ["WP"], "recursion_limit": 40},)
 
 #print(response)
 #response.pretty_print()
