@@ -130,8 +130,8 @@ def search_travels(runtime: ToolRuntime) -> str:
     """Invoca al travel_agent para realizar busquedas de vuelos al destino indicado"""
     origin = runtime.state["origin"]
     destination = runtime.state["destination"]
-    response = travel_agent.invoke({"message": [HumanMessage(content=f"Busca vuelos de {origin} a {destination}")]})
-    return response["message"][-1].content
+    response = travel_agent.invoke({"messages": [HumanMessage(content=f"Busca vuelos de {origin} a {destination}")]})
+    return response["messages"][-1].content
 
 
 @tool
@@ -140,15 +140,15 @@ def search_spaces(runtime: ToolRuntime) -> str:
     destination = runtime.state["destination"]
     capacity = runtime.state["guest_count"]
     query = f"Busca lugares en {destination} con capacidad de {capacity}"
-    response = search_spaces_agent.invoke({"message": [HumanMessage(content=query)]})
-    return response["message"][-1].content
+    response = search_spaces_agent.invoke({"messages": [HumanMessage(content=query)]})
+    return response["messages"][-1].content
 
 @tool
 def suggest_playlist(runtime: ToolRuntime) -> str:
     """El agente de listas de reproducción selecciona la lista de reproducción perfecta para el género determinado."""
     genre = runtime.state["genre"]
-    response = playlist_agent.invoke({"message": [HumanMessage(f"Busca play list de bodas con el genero {genre}")]})
-    return response["message"][-1].content
+    response = playlist_agent.invoke({"messages": [HumanMessage(f"Busca play list de bodas con el genero {genre}")]})
+    return response["messages"][-1].content
 
 @tool
 def update_state(origin: str, destination: str, guest_count: str, genre: str, runtime: ToolRuntime) -> str:
@@ -165,7 +165,7 @@ def update_state(origin: str, destination: str, guest_count: str, genre: str, ru
 
 ## Agente orquestador
 coordinator = create_agent(model = "gpt-5-nano",
-                     tools=[search_travels, search_spaces, suggest_playlist],
+                     tools=[search_travels, search_spaces, suggest_playlist, update_state],
                      state_schema=WeddingState,
                      system_prompt = """Eres coordinadora de bodas. 
                                         Primero, reúne toda la información necesaria para actualizar el estado. 
